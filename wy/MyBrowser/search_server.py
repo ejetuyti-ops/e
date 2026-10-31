@@ -17,7 +17,6 @@ import json
 import re
 import sqlite3
 import threading
-import webbrowser
 
 HOST = "127.0.0.1"
 PORT = 8765
@@ -199,6 +198,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
+        if parsed.path == "/api/health":
+            return self.send_json(200, {
+                "ok": True,
+                "engine": "EJET Search",
+                "mode": "headless",
+                "database": str(DB_PATH),
+            })
         if parsed.path == "/api/search":
             query = clean_text(parse_qs(parsed.query).get("q", [""])[0])
             if not query:
@@ -227,12 +233,11 @@ class Handler(BaseHTTPRequestHandler):
                 crawl = dict(CRAWL_STATE)
             return self.send_json(200, {"indexed_pages": count, "engine": "EJET Search", "crawl": crawl})
         if parsed.path in ("/", "/index.html"):
-            page = PAGE.encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(page)))
-            self.end_headers()
-            return self.wfile.write(page)
+            return self.send_json(200, {
+                "engine": "EJET Search",
+                "mode": "headless",
+                "message": "Use the /api endpoints from EJET Browser."
+            })
         self.send_error(404)
 
     def do_POST(self):
@@ -283,48 +288,9 @@ class Handler(BaseHTTPRequestHandler):
         print("[EJET Search] " + (fmt % args))
 
 
-PAGE = """<!doctype html>
-<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>EJET Search</title>
-<style>
-*{box-sizing:border-box}body{margin:0;background:#080d18;color:#e8eefc;font:16px Arial,sans-serif}
-main{max-width:850px;margin:12vh auto;padding:24px}.brand{font-size:54px;font-weight:800;letter-spacing:-2px;color:#8abaff}
-p{color:#9fb2cc}.search{display:flex;gap:10px;margin:28px 0}
-input{flex:1;min-width:0;background:#101a2b;color:white;border:1px solid #385273;border-radius:14px;padding:17px;font-size:17px}
-button{background:#2563eb;color:white;border:0;border-radius:12px;padding:0 22px;font-size:16px;cursor:pointer}
-.result{padding:18px 0;border-bottom:1px solid #263751}.result a{color:#8abaff;font-size:19px;text-decoration:none}
-.url{color:#70c49a;font-size:13px;margin:7px 0}.muted{font-size:13px;color:#8092ad}
-</style><main><div class="brand">EJET</div><h1>Search</h1>
-<p>Private local index. No external search provider. Results come only from pages you have indexed.</p>
-<form class="search" id="form"><input id="q" placeholder="Search your EJET index…" autofocus><button>Search</button></form>
-<h2>Build your index</h2><p>Enter a public website URL. EJET will crawl up to 20 pages on that same site, respecting robots.txt.</p>
-<form class="search" id="crawlForm"><input id="site" type="url" placeholder="https://example.com" required><button id="crawlButton">Crawl site</button></form>
-<div id="status" class="muted"></div><section id="results"></section>
-<script>
-const form=document.getElementById('form'),q=document.getElementById('q'),results=document.getElementById('results'),status=document.getElementById('status');
-const crawlForm=document.getElementById('crawlForm'),site=document.getElementById('site'),crawlButton=document.getElementById('crawlButton');
-async function refreshStats(){const d=await fetch('/api/stats').then(r=>r.json());const c=d.crawl||{};
-status.textContent=d.indexed_pages+' pages indexed. '+(c.running?'Crawling… visited '+c.visited+', indexed '+c.indexed+'.':c.error?'Last crawl error: '+c.error:'Crawler idle.');crawlButton.disabled=!!c.running;crawlButton.textContent=c.running?'Crawling…':'Crawl site';}
-refreshStats();setInterval(refreshStats,2000);
-crawlForm.addEventListener('submit',async e=>{e.preventDefault();crawlButton.disabled=true;
-try{const r=await fetch('/api/crawl',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:site.value,max_pages:20})});const d=await r.json();if(!r.ok)throw new Error(d.error||'Could not start crawl');status.textContent='Crawl started for '+d.url;refreshStats();}
-catch(err){status.textContent=err.message;crawlButton.disabled=false;}});
-form.addEventListener('submit',async e=>{e.preventDefault();results.textContent='';status.textContent='Searching local index…';
-const data=await fetch('/api/search?q='+encodeURIComponent(q.value)).then(r=>r.json());
-status.textContent=data.results.length+' results in your local index.';
-for(const item of data.results){const box=document.createElement('article');box.className='result';
-const a=document.createElement('a');a.href=item.url;a.textContent=item.title;a.target='_blank';a.rel='noopener noreferrer';
-const url=document.createElement('div');url.className='url';url.textContent=item.url;
-const p=document.createElement('p');p.textContent=item.excerpt;
-box.append(a,url,p);results.append(box)}
-if(!data.results.length){const p=document.createElement('p');p.textContent='No matching indexed pages yet. The index is empty or has no match.';results.append(p)}
-});
-</script></main></html>"""
-
-
 if __name__ == "__main__":
     with DB_LOCK:
         connect_db().close()
     print(f"EJET Search running at http://{HOST}:{PORT}")
-    print("Local-only server. Stop with Ctrl+C.")
+    print("Headless local API. Stop with Ctrl+C.")
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
