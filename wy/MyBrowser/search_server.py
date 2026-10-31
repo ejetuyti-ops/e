@@ -57,6 +57,22 @@ class CrawlParser(HTMLParser):
             self.text_parts.append(value)
 
 
+def normalize_idn_url(url):
+    """Convert Unicode domain labels to IDNA/Punycode for HTTP requests."""
+    parsed = urlparse(url.strip())
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError("Enter a valid http:// or https:// URL.")
+    if parsed.username or parsed.password:
+        raise ValueError("URLs containing usernames or passwords are not accepted.")
+    try:
+        ascii_host = parsed.hostname.encode("idna").decode("ascii")
+    except UnicodeError:
+        raise ValueError("The international domain name is invalid.")
+    port = f":{parsed.port}" if parsed.port else ""
+    netloc = ascii_host + port
+    return parsed._replace(netloc=netloc).geturl()
+
+
 def is_public_host(host):
     try:
         addresses = {item[4][0] for item in socket.getaddrinfo(host, None)}
@@ -66,6 +82,7 @@ def is_public_host(host):
 
 
 def crawl_site(seed_url, max_pages):
+    seed_url = normalize_idn_url(seed_url)
     parsed_seed = urlparse(seed_url)
     host = parsed_seed.hostname
     if parsed_seed.scheme not in ("http", "https") or not host or not is_public_host(host):
@@ -113,6 +130,10 @@ def crawl_site(seed_url, max_pages):
                 indexed += 1
             for link in parser.links:
                 absolute = urldefrag(urljoin(current, link))[0]
+                try:
+                    absolute = normalize_idn_url(absolute)
+                except ValueError:
+                    continue
                 lp = urlparse(absolute)
                 if lp.hostname == host and lp.scheme in ("http", "https") and absolute not in seen and len(pending) < max_pages * 3:
                     pending.append(absolute)
@@ -222,7 +243,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(400, {"error": "Invalid request size"})
             data = json.loads(self.rfile.read(length).decode("utf-8"))
             if path == "/api/crawl":
-                seed = clean_text(data.get("url"))[:2000]
+                seed = normalize_idn_url(clean_text(data.get("url"))[:2000])
                 limit = max(1, min(int(data.get("max_pages", 20)), 20))
                 with CRAWL_LOCK:
                     if CRAWL_STATE["running"]:
