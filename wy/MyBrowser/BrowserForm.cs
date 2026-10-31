@@ -89,19 +89,23 @@ public sealed class BrowserForm : Form
                     _ownsServer = _python is not null;
                 }
             }
+            var serverReady = false;
             for (var i = 0; i < 30; i++)
             {
                 try
                 {
                     using var response = await _http.GetAsync(Api + "/api/health");
-                    if (response.IsSuccessStatusCode) break;
+                    if (response.IsSuccessStatusCode) { serverReady = true; break; }
                 }
                 catch { await Task.Delay(300); }
             }
+            if (!serverReady)
+                _status.Text = "محرك البحث غير متصل — تحقق من Python وملف search_server.py";
             await _web.EnsureCoreWebView2Async();
             _web.CoreWebView2.NavigationCompleted += (_, _) => { if (_web.Source is not null) _address.Text = _web.Source.ToString(); };
             ShowHome();
-            _status.Text = "EJET Search جاهز — قاعدة البيانات محلية ومحفوظة";
+            if (serverReady)
+                _status.Text = "EJET Search جاهز — قاعدة البيانات محلية ومحفوظة";
         }
         catch (Exception ex) { _status.Text = "تعذر تشغيل المتصفح: " + ex.Message; }
     }
@@ -121,7 +125,7 @@ public sealed class BrowserForm : Form
             _web.CoreWebView2?.Navigate(uri.ToString());
             return;
         }
-        if (!value.Contains(' ') && value.Contains('.') && !value.StartsWith("www.", StringComparison.OrdinalIgnoreCase))
+        if (!value.Contains(' ') && value.Contains('.') )
         {
             _web.CoreWebView2?.Navigate("https://" + value);
             return;
