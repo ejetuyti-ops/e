@@ -5,8 +5,13 @@ The server binds only to 127.0.0.1 and stores indexed pages in ejет_search.db.
 No third-party search API or analytics are used.
 """
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, urljoin, urldefrag
+from urllib.request import Request, urlopen
+from urllib.robotparser import RobotFileParser
 from html.parser import HTMLParser
+import ipaddress
+import socket
+import time
 from pathlib import Path
 import json
 import re
@@ -18,6 +23,104 @@ HOST = "127.0.0.1"
 PORT = 8765
 DB_PATH = Path(__file__).with_name("ejet_search.db")
 DB_LOCK = threading.Lock()
+CRAWL_LOCK = threading.Lock()
+CRAWL_STATE = {"running": False, "visited": 0, "indexed": 0, "error": None}
+
+
+class CrawlParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.title_parts, self.text_parts, self.links = [], [], []
+        self.in_title = False
+        self.skip = 0
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "title":
+            self.in_title = True
+        if tag in ("script", "style", "noscript", "svg"):
+            self.skip += 1
+        if tag == "a" and attrs.get("href"):
+            self.links.append(attrs["href"])
+
+    def handle_endtag(self, tag):
+        if tag == "title":
+            self.in_title = False
+        if tag in ("script", "style", "noscript", "svg") and self.skip:
+            self.skip -= 1
+
+    def handle_data(self, data):
+        value = data.strip()
+        if value and self.in_title:
+            self.title_parts.append(value)
+        if value and not self.skip:
+            self.text_parts.append(value)
+
+
+def is_public_host(host):
+    try:
+        addresses = {item[4][0] for item in socket.getaddrinfo(host, None)}
+        return bool(addresses) and all(ipaddress.ip_address(addr).is_global for addr in addresses)
+    except (OSError, ValueError):
+        return False
+
+
+def crawl_site(seed_url, max_pages):
+    parsed_seed = urlparse(seed_url)
+    host = parsed_seed.hostname
+    if parsed_seed.scheme not in ("http", "https") or not host or not is_public_host(host):
+        raise ValueError("Use a public http/https website URL.")
+    robots = RobotFileParser()
+    robots.set_url(f"{parsed_seed.scheme}://{host}/robots.txt")
+    try:
+        robots.read()
+    except Exception:
+        robots = None
+
+    pending = [seed_url]
+    seen = set()
+    indexed = 0
+    while pending and len(seen) < max_pages:
+        current = pending.pop(0)
+        current, _fragment = urldefrag(current)
+        if current in seen:
+            continue
+        seen.add(current)
+        p = urlparse(current)
+        if p.hostname != host or p.scheme not in ("http", "https"):
+            continue
+        if robots and not robots.can_fetch("EJETSearchBot", current):
+            continue
+        try:
+            request = Request(current, headers={"User-Agent": "EJETSearchBot/0.1 (+local personal search)"})
+            with urlopen(request, timeout=8) as response:
+                if "text/html" not in response.headers.get("Content-Type", ""):
+                    continue
+                raw = response.read(1_000_000)
+                charset = response.headers.get_content_charset() or "utf-8"
+                html = raw.decode(charset, errors="replace")
+            parser = CrawlParser()
+            parser.feed(html)
+            title = clean_text(" ".join(parser.title_parts)) or current
+            content = clean_text(" ".join(parser.text_parts))[:200_000]
+            if content:
+                with DB_LOCK, connect_db() as db:
+                    db.execute(
+                        "INSERT INTO pages(title,url,content) VALUES(?,?,?) "
+                        "ON CONFLICT(url) DO UPDATE SET title=excluded.title,content=excluded.content,added_at=CURRENT_TIMESTAMP",
+                        (title[:300], current[:2000], content),
+                    )
+                indexed += 1
+            for link in parser.links:
+                absolute = urldefrag(urljoin(current, link))[0]
+                lp = urlparse(absolute)
+                if lp.hostname == host and lp.scheme in ("http", "https") and absolute not in seen and len(pending) < max_pages * 3:
+                    pending.append(absolute)
+            time.sleep(0.5)
+        except Exception as exc:
+            print(f"[EJET crawler] skipped {current}: {exc}")
+    with CRAWL_LOCK:
+        CRAWL_STATE.update({"running": False, "visited": len(seen), "indexed": indexed, "error": None})
 
 
 class TextExtractor(HTMLParser):
@@ -99,7 +202,9 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/stats":
             with DB_LOCK, connect_db() as db:
                 count = db.execute("SELECT COUNT(*) FROM pages").fetchone()[0]
-            return self.send_json(200, {"indexed_pages": count, "engine": "EJET Search"})
+            with CRAWL_LOCK:
+                crawl = dict(CRAWL_STATE)
+            return self.send_json(200, {"indexed_pages": count, "engine": "EJET Search", "crawl": crawl})
         if parsed.path in ("/", "/index.html"):
             page = PAGE.encode("utf-8")
             self.send_response(200)
@@ -110,13 +215,24 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def do_POST(self):
-        if urlparse(self.path).path != "/api/index":
-            return self.send_error(404)
+        path = urlparse(self.path).path
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if length < 1 or length > 1_000_000:
                 return self.send_json(400, {"error": "Invalid request size"})
             data = json.loads(self.rfile.read(length).decode("utf-8"))
+            if path == "/api/crawl":
+                seed = clean_text(data.get("url"))[:2000]
+                limit = max(1, min(int(data.get("max_pages", 20)), 20))
+                with CRAWL_LOCK:
+                    if CRAWL_STATE["running"]:
+                        return self.send_json(409, {"error": "A crawl is already running"})
+                    CRAWL_STATE.update({"running": True, "visited": 0, "indexed": 0, "error": None})
+                worker = threading.Thread(target=self._run_crawl, args=(seed, limit), daemon=True)
+                worker.start()
+                return self.send_json(202, {"started": True, "url": seed, "max_pages": limit})
+            if path != "/api/index":
+                return self.send_error(404)
             title = clean_text(data.get("title"))[:300]
             url = clean_text(data.get("url"))[:2000]
             content = clean_text(data.get("content"))[:200_000]
@@ -134,6 +250,13 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(201, {"indexed": True, "url": url})
         except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
             return self.send_json(400, {"error": "Invalid JSON request"})
+
+    def _run_crawl(self, seed, limit):
+        try:
+            crawl_site(seed, limit)
+        except Exception as exc:
+            with CRAWL_LOCK:
+                CRAWL_STATE.update({"running": False, "error": str(exc)})
 
     def log_message(self, fmt, *args):
         print("[EJET Search] " + (fmt % args))
