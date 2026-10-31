@@ -276,10 +276,18 @@ button{background:#2563eb;color:white;border:0;border-radius:12px;padding:0 22px
 </style><main><div class="brand">EJET</div><h1>Search</h1>
 <p>Private local index. No external search provider. Results come only from pages you have indexed.</p>
 <form class="search" id="form"><input id="q" placeholder="Search your EJET index…" autofocus><button>Search</button></form>
+<h2>Build your index</h2><p>Enter a public website URL. EJET will crawl up to 20 pages on that same site, respecting robots.txt.</p>
+<form class="search" id="crawlForm"><input id="site" type="url" placeholder="https://example.com" required><button id="crawlButton">Crawl site</button></form>
 <div id="status" class="muted"></div><section id="results"></section>
 <script>
 const form=document.getElementById('form'),q=document.getElementById('q'),results=document.getElementById('results'),status=document.getElementById('status');
-fetch('/api/stats').then(r=>r.json()).then(d=>status.textContent=d.indexed_pages+' pages in your local index.');
+const crawlForm=document.getElementById('crawlForm'),site=document.getElementById('site'),crawlButton=document.getElementById('crawlButton');
+async function refreshStats(){const d=await fetch('/api/stats').then(r=>r.json());const c=d.crawl||{};
+status.textContent=d.indexed_pages+' pages indexed. '+(c.running?'Crawling… visited '+c.visited+', indexed '+c.indexed+'.':c.error?'Last crawl error: '+c.error:'Crawler idle.');crawlButton.disabled=!!c.running;crawlButton.textContent=c.running?'Crawling…':'Crawl site';}
+refreshStats();setInterval(refreshStats,2000);
+crawlForm.addEventListener('submit',async e=>{e.preventDefault();crawlButton.disabled=true;
+try{const r=await fetch('/api/crawl',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:site.value,max_pages:20})});const d=await r.json();if(!r.ok)throw new Error(d.error||'Could not start crawl');status.textContent='Crawl started for '+d.url;refreshStats();}
+catch(err){status.textContent=err.message;crawlButton.disabled=false;}});
 form.addEventListener('submit',async e=>{e.preventDefault();results.textContent='';status.textContent='Searching local index…';
 const data=await fetch('/api/search?q='+encodeURIComponent(q.value)).then(r=>r.json());
 status.textContent=data.results.length+' results in your local index.';
