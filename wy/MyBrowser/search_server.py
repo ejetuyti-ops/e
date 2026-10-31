@@ -79,7 +79,9 @@ class Handler(BaseHTTPRequestHandler):
             query = clean_text(parse_qs(parsed.query).get("q", [""])[0])
             if not query:
                 return self.send_json(200, {"query": query, "results": []})
-            terms = [term for term in query.split() if len(term) > 1][:8]
+            terms = query.split()[:8]
+            if not terms:
+                return self.send_json(200, {"query": query, "results": []})
             where = " AND ".join(["(title LIKE ? OR content LIKE ?)"] * len(terms))
             params = []
             for term in terms:
