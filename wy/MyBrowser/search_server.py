@@ -181,7 +181,7 @@ def connect_db():
 
 
 def clean_text(value):
-    return re.sub(r"\\s+", " ", value or "").strip()
+    return re.sub(r"\s+", " ", value or "").strip()
 
 
 class Handler(BaseHTTPRequestHandler):
